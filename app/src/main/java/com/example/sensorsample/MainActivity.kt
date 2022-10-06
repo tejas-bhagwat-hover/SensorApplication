@@ -9,20 +9,24 @@ import android.hardware.SensorManager
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
 import com.example.sensorsample.databinding.ActivityMainBinding
-import java.util.*
 
 @SuppressLint("SetTextI18n")
 class MainActivity : AppCompatActivity(), SensorEventListener {
     private lateinit var mainActivityBinding: ActivityMainBinding
 
-    private val accelerometerReading = FloatArray(3)
-    private val magnetometerReading = FloatArray(3)
+    private val mGravity = FloatArray(3)
+    private val mGeomagnetic = FloatArray(3)
+    private val rotationMatrix = FloatArray(9)
+    private val inclinationMatrix = FloatArray(9)
+    private val alpha = 0.97f
+
+    private var azimuth = 0f
+    private val azimuthFix = 0f
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         mainActivityBinding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(mainActivityBinding.root)
-
         val sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         val accelerometer = sensorManager.getDefaultSensor(TYPE_ACCELEROMETER)
         val gravitySensor = sensorManager.getDefaultSensor(TYPE_GRAVITY)
@@ -54,7 +58,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     "linearAccelerometerSupported: $linearAccelerometerSupported\n" +
                     "magnetometerSupported: $magnetometerSupported\n" +
                     "rotationVectorSupported: $rotationVectorSupported"
-
     }
 
     override fun onSensorChanged(sensorEvent: SensorEvent?) {
@@ -65,7 +68,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                             "X:${sensorEvent.values[0]}\n" +
                             "Y:${sensorEvent.values[1]}\n" +
                             "Z:${sensorEvent.values[2]}"
-                lowPassFilter(sensorEvent.values.clone(), accelerometerReading)
             }
             TYPE_GRAVITY -> {
                 mainActivityBinding.tvGravity.text =
@@ -94,7 +96,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                             "X:${sensorEvent.values[0]}\n" +
                             "Y:${sensorEvent.values[1]}\n" +
                             "Z:${sensorEvent.values[2]}"
-                lowPassFilter(sensorEvent.values.clone(), magnetometerReading)
             }
             TYPE_ROTATION_VECTOR -> {
                 mainActivityBinding.tvQuaternion.text =
@@ -105,77 +106,38 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                             "w:${sensorEvent.values[3]}"
             }
         }
-        updateHeading()
+
+
+        synchronized(this) {
+            if (sensorEvent?.sensor?.type == TYPE_ACCELEROMETER) {
+                mGravity[0] = alpha * mGravity[0] + (1 - alpha) * sensorEvent.values[0]
+                mGravity[1] = alpha * mGravity[1] + (1 - alpha) * sensorEvent.values[1]
+                mGravity[2] = alpha * mGravity[2] + (1 - alpha) * sensorEvent.values[2]
+            }
+            if (sensorEvent?.sensor?.type == TYPE_MAGNETIC_FIELD) {
+                mGeomagnetic[0] = alpha * mGeomagnetic[0] + (1 - alpha) * sensorEvent.values[0]
+                mGeomagnetic[1] = alpha * mGeomagnetic[1] + (1 - alpha) * sensorEvent.values[1]
+                mGeomagnetic[2] = alpha * mGeomagnetic[2] + (1 - alpha) * sensorEvent.values[2]
+            }
+            val success = SensorManager.getRotationMatrix(
+                rotationMatrix, inclinationMatrix, mGravity,
+                mGeomagnetic
+            )
+            if (success) {
+                val orientation = FloatArray(3)
+                SensorManager.getOrientation(rotationMatrix, orientation)
+                // Log.d(TAG, "azimuth (rad): " + azimuth);
+                azimuth =
+                    Math.toDegrees(orientation[0].toDouble()).toFloat() // orientation
+                azimuth = (azimuth + azimuthFix + 360) % 360
+                mainActivityBinding.tvHeading.text = "Heading:$azimuth"
+            }
+        }
     }
 
-    private var heading = 0f
-    private fun updateHeading() {
-        heading = calculateHeading(accelerometerReading, magnetometerReading)
-        heading = convertRadtoDeg(heading)
-        heading = map180to360(heading)
-        mainActivityBinding.tvHeading.text = heading.toString()
-    }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-        if (sensor?.type == TYPE_MAGNETIC_FIELD) {
-            //   3 - android.hardware.SensorManager.SENSOR_STATUS_ACCURACY_HIGH
-            mainActivityBinding.tvMagnetAccuracy.text =
-                "calibratedMagneticFieldAccuracy:$accuracy"
-        }
+
     }
 
-    private val alpha = 0.15f
-
-    private fun lowPassFilter(input: FloatArray, output: FloatArray): FloatArray {
-        for (i in input.indices) {
-            output[i] = output[i] + alpha * (input[i] - output[i])
-        }
-        return output
-    }
-
-    fun convertRadtoDeg(rad: Float): Float {
-        return (rad / Math.PI).toFloat() * 180
-    }
-
-    //map angle from [-180,180] range to [0,360] range
-    fun map180to360(angle: Float): Float {
-        return (angle + 360) % 360
-    }
-
-    private fun calculateHeading(
-        accelerometerReading: FloatArray,
-        magnetometerReading: FloatArray
-    ): Float {
-        var Ax = accelerometerReading[0]
-        var Ay = accelerometerReading[1]
-        var Az = accelerometerReading[2]
-        val Ex = magnetometerReading[0]
-        val Ey = magnetometerReading[1]
-        val Ez = magnetometerReading[2]
-
-        //cross product of the magnetic field vector and the gravity vector
-        var Hx = Ey * Az - Ez * Ay
-        var Hy = Ez * Ax - Ex * Az
-        var Hz = Ex * Ay - Ey * Ax
-
-        //normalize the values of resulting vector
-        val invH = 1.0f / Math.sqrt((Hx * Hx + Hy * Hy + Hz * Hz).toDouble()).toFloat()
-        Hx *= invH
-        Hy *= invH
-        Hz *= invH
-
-        //normalize the values of gravity vector
-        val invA = 1.0f / Math.sqrt((Ax * Ax + Ay * Ay + Az * Az).toDouble()).toFloat()
-        Ax *= invA
-        Ay *= invA
-        Az *= invA
-
-        //cross product of the gravity vector and the new vector H
-        val Mx = Ay * Hz - Az * Hy
-        val My = Az * Hx - Ax * Hz
-        val Mz = Ax * Hy - Ay * Hx
-
-        //arctangent to obtain heading in radians
-        return Math.atan2(Hy.toDouble(), My.toDouble()).toFloat()
-    }
 }
